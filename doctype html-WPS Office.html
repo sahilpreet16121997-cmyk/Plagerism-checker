@@ -1,0 +1,210 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Offline Plagiarism Checker (Mobile)</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
+    body{max-width:900px;margin:12px auto;padding:12px}
+    header{display:flex;align-items:center;gap:12px}
+    h1{font-size:18px;margin:0}
+    textarea{width:100%;min-height:160px;padding:10px;font-size:14px}
+    .row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+    button,input,select{padding:8px;border-radius:6px;border:1px solid #ccc;background:#fff}
+    .card{border:1px solid #eee;padding:10px;border-radius:8px;margin-top:10px}
+    ul{padding-left:18px}
+    .match{margin:8px 0;padding:8px;border-radius:6px;background:#f9f9f9}
+    .excerpt{font-family:monospace;background:#fff;padding:6px;border-radius:4px;display:block;margin-top:6px}
+    small{color:#666}
+    footer{margin-top:18px;font-size:13px;color:#555}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Offline Plagiarism Checker</h1>
+    <small>Runs in your Android browser — no server, no cost</small>
+  </header>
+
+  <div class="card">
+    <strong>1) Add documents to compare against (corpus)</strong>
+    <div class="row" style="margin-top:8px">
+      <input id="file" type="file" accept=".txt" />
+      <button id="addBtn">Add file</button>
+      <button id="clearCorpus">Clear corpus</button>
+    </div>
+    <small>Only plain text (.txt) is supported for uploads. You can also copy/paste text into the corpus area below.</small>
+    <div style="margin-top:8px">
+      <textarea id="corpusBox" placeholder="(Optional) Paste or edit corpus documents here, separated by ---"></textarea>
+      <div style="margin-top:6px"><small>Separate multiple documents with a line containing three dashes: <code>---</code></small></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>2) Paste the student text to check</strong>
+    <textarea id="query" placeholder="Paste the submission text to check here"></textarea>
+
+    <div class="row" style="margin-top:8px">
+      <label>Shingle size (words): <input id="k" type="number" value="5" style="width:72px" /></label>
+      <label>Min match pct (show): <input id="minPct" type="number" value="10" style="width:72px" /></label>
+      <button id="check">Check plagiarism</button>
+      <button id="saveDoc">Save submission to corpus</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>Results</strong>
+    <div id="results">No check run yet.</div>
+  </div>
+
+  <footer>
+    <p><strong>Note:</strong> This offline checker only compares text against documents you provide. It cannot search the whole internet like Turnitin.</p>
+  </footer>
+
+<script>
+function normalize(text){
+  return text.replace(/[\u2018\u2019\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, ' ')
+    .replace(/[^\w\s']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+function words(text){ return normalize(text).split(' ').filter(Boolean); }
+function shingles(text, k){
+  const w = words(text);
+  const s = new Set();
+  for(let i=0;i+k<=w.length;i++) s.add(w.slice(i,i+k).join(' '));
+  return s;
+}
+function jaccard(a,b){
+  if(a.size===0 && b.size===0) return 1;
+  const inter = [...a].filter(x=>b.has(x)).length;
+  const uni = new Set([...a,...b]).size;
+  return uni===0?0:inter/uni;
+}
+function termFreqMap(tokens){
+  const m = new Map();
+  tokens.forEach(t=> m.set(t, (m.get(t)||0)+1));
+  return m;
+}
+function buildTfIdf(docsTokens){
+  const df = new Map();
+  docsTokens.forEach(tokens=>{
+    const seen = new Set(tokens);
+    seen.forEach(t=> df.set(t,(df.get(t)||0)+1));
+  });
+  const N = docsTokens.length;
+  const idf = new Map();
+  df.forEach((v,k)=> idf.set(k, Math.log((N+1)/(v+1))+1));
+  const tfs = docsTokens.map(tokens=> termFreqMap(tokens));
+  const tfidf = tfs.map(tf=>{
+    const m = new Map();
+    tf.forEach((val,term)=> m.set(term, val*(idf.get(term)||1)));
+    return m;
+  });
+  return {tfidf, idf};
+}
+function cosineMap(aMap,bMap){
+  let dot=0, na=0, nb=0;
+  aMap.forEach((va,k)=>{ na+=va*va; if(bMap.has(k)) dot+=va*bMap.get(k); });
+  bMap.forEach(vb=> nb+=vb*vb);
+  if(na===0 || nb===0) return 0;
+  return dot/(Math.sqrt(na)*Math.sqrt(nb));
+}
+function loadCorpus(){
+  const fromBox = document.getElementById('corpusBox').value.trim();
+  const pieces = fromBox.length? fromBox.split('\n---\n').map(s=>s.trim()).filter(Boolean):[];
+  const saved = JSON.parse(localStorage.getItem('corpus_docs')||'[]');
+  return [...saved, ...pieces];
+}
+function saveCorpusArray(arr){ localStorage.setItem('corpus_docs', JSON.stringify(arr)); }
+
+document.getElementById('addBtn').onclick = ()=>{
+  const f = document.getElementById('file').files[0];
+  if(!f){ alert('Choose a .txt file first'); return; }
+  const reader = new FileReader();
+  reader.onload = e=>{
+    const txt = e.target.result;
+    const arr = JSON.parse(localStorage.getItem('corpus_docs')||'[]');
+    arr.push(String(txt));
+    saveCorpusArray(arr);
+    alert('File added to corpus.');
+  };
+  reader.readAsText(f);
+};
+document.getElementById('clearCorpus').onclick = ()=>{
+  if(confirm('Clear saved corpus?')){
+    localStorage.removeItem('corpus_docs');
+    document.getElementById('corpusBox').value='';
+    alert('Cleared.');
+  }
+};
+document.getElementById('saveDoc').onclick = ()=>{
+  const q = document.getElementById('query').value.trim();
+  if(!q){ alert('Paste submission text first'); return; }
+  const arr = JSON.parse(localStorage.getItem('corpus_docs')||'[]');
+  arr.push(q);
+  saveCorpusArray(arr);
+  alert('Submission saved.');
+};
+
+document.getElementById('check').onclick = ()=>{
+  const qText = document.getElementById('query').value.trim();
+  if(!qText){ alert('Paste text to check'); return; }
+  const k = Math.max(2, parseInt(document.getElementById('k').value)||5);
+  const minPct = Math.max(1, parseFloat(document.getElementById('minPct').value)||10);
+  const corpus = loadCorpus().filter(Boolean);
+
+  const resultsDiv = document.getElementById('results');
+  resultsDiv.innerHTML = '<small>Checking...</small>';
+
+  const qSh = shingles(qText, k);
+  const corpusSh = corpus.map(d=> ({text:d, sh:shingles(d,k)}));
+
+  const docsTokens = corpus.map(d=> words(d));
+  const qTokens = words(qText);
+  const allDocsTokens = docsTokens.length? docsTokens.slice():[];
+  if(allDocsTokens.length===0) allDocsTokens.push(qTokens);
+  const {tfidf} = buildTfIdf(allDocsTokens.concat([qTokens]));
+  const queryVec = tfidf[tfidf.length-1];
+  const docTfs = tfidf.slice(0, Math.max(0, tfidf.length-1));
+
+  const scored = corpus.map((d,i)=>{
+    const jac = jaccard(qSh, corpusSh[i].sh);
+    const cos = docTfs[i]? cosineMap(queryVec, docTfs[i]) : 0;
+    return {text:d, jac, cos};
+  });
+
+  scored.sort((a,b)=> (b.jac+b.cos) - (a.jac+a.cos));
+
+  const out = [];
+  out.push('<div><small>Shingle size: '+k+' words — Showing matches above '+minPct+'%</small></div>');
+  scored.forEach(s=>{
+    const percent = Math.round(100 * Math.max(s.jac, s.cos));
+    if(percent < minPct) return;
+    let excerpt = '';
+    try{
+      const qWords = Array.from(shingles(qText,k));
+      const dWords = Array.from(shingles(s.text,k));
+      const common = qWords.filter(x=> dWords.includes(x));
+      if(common.length) excerpt = common.slice(0,3).join(' ... ');
+    } catch(e){ excerpt=''; }
+    out.push('<div class="match">'
+      +'<strong>Match: '+percent+'%</strong> <small>(Jaccard: '+(s.jac.toFixed(3))+' • Cosine: '+(s.cos.toFixed(3))+')</small>'
+      +(excerpt?('<div class="excerpt">...'+escapeHtml(excerpt)+'...</div>'):'')
+      +'</div>');
+  });
+  if(out.length===1) out.push('<div><small>No significant matches found.</small></div>');
+  resultsDiv.innerHTML = out.join('\n');
+};
+
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+(function init(){
+  const saved = JSON.parse(localStorage.getItem('corpus_docs')||'[]');
+  if(saved.length) document.getElementById('corpusBox').value = saved.join('\n---\n');
+})();
+</script>
+</body>
+</html>
+
